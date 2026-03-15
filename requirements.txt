@@ -1,0 +1,21 @@
+# Polymarket BTC 5-Min Telegram Bot — Python dependencies
+# Pin exact versions for reproducible Railway deploys
+
+# Telegram bot framework
+python-telegram-bot==21.9
+
+# HTTP client (async)
+httpx==0.27.2
+
+# Environment variables
+python-dotenv==1.0.1
+
+# Polymarket CLOB SDK — MUST be 0.34.6, compatible with py-order-utils==0.3.2
+# Do NOT pin to old versions (e.g. 0.6.0) — py_order_utils.config module didn't exist then
+py-clob-client==0.34.6
+py-order-utils==0.3.2
+
+# Ethereum dependencies (required by py-clob-client + py-order-utils)
+eth-account>=0.13.0
+eth-utils>=4.1.1
+poly-eip712-structs>=0.0.1
