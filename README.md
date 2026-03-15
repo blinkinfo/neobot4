@@ -1,6 +1,6 @@
-# 🤖 NeoBot — Polymarket BTC 5-Min Trading Bot
+# 🤖 NeoBot — Polymarket BTC 5-Min Trading Bot with AutoTrade
 
-A production-ready Telegram bot for trading Polymarket's **5-minute Bitcoin Up/Down** prediction markets. Execute trades, monitor slots, and manage your portfolio — all from Telegram.
+A production-ready Telegram bot for trading and automating Polymarket's **5-minute Bitcoin Up/Down** prediction markets. Features manual trading via Telegram UI, a powerful **ALMA + Choppiness Index** strategy, demo mode for testing without real money, and real slot trading with precise timing.
 
 ![Python](https://img.shields.io/badge/Python-3.11+-blue?logo=python&logoColor=white)
 ![Telegram](https://img.shields.io/badge/Telegram-Bot-26A5E4?logo=telegram&logoColor=white)
@@ -13,22 +13,36 @@ A production-ready Telegram bot for trading Polymarket's **5-minute Bitcoin Up/D
 
 ### 📊 Slot Navigator
 - View **current LIVE slot** + next 3 upcoming 5-minute windows
-- Real-time Up/Down prices with visual probability bars
-- Live BTC price from Binance
+- Real-time Up/Down token prices with visual probability bars
+- Live BTC reference price from multiple sources (CoinGecko, Coinbase, Kraken, Binance fallback)
 - Countdown timers (remaining for live, starts-in for upcoming)
 - Prev/Next navigation with instant refresh
+- Order book inspection for any slot
 
 ### ⚡ Trading Engine
-- **Quick Trade** — One-tap buy at your preset amount (default $5)
+- **Quick Trade** — One-tap buy at your preset amount (default $5 USDC)
 - **Custom Trade** — Enter any USDC amount
 - **Market Orders** — Fill-or-Kill (FOK) execution via Polymarket CLOB
 - Works on both **live** and **upcoming** slots
-- Confirmation screen with estimated shares, payout & profit before execution
+- Confirmation screen with estimated shares, max payout & potential profit before execution
+- Token price refresh on confirmation for accuracy
+
+### 🤖 AutoTrade System
+- **Automated Trading** — Executes trades 10 seconds before each slot opens based on strategy signals
+- **Demo Mode** — Simulate trades without risking capital; perfect for testing and backtracking
+- **Demo Result Tracking** — Automatically checks resolved slots, scores wins/losses, tracks PnL and streaks
+- **Persistent State** — All settings, trades, and stats saved locally; survives bot restarts
+
+### 📈 Trading Strategy: ALMA + Choppiness Index
+- **ALMA (Arnaud Legoux Moving Average)** — Smooth, lag-minimizing trend indicator (14-period, offset=0.85, sigma=6)
+- **Crossover Detection** — Trades only when price crosses the ALMA line; avoids ranging markets
+- **Choppiness Index Gate** — Blocks trades when CI ≥ 45 (market is range-bound/choppy)
+- **Data Sources** — MEXC 5-min BTC-USDT candles (primary), Coinbase fallback
 
 ### 💼 Portfolio Management
-- **Balance** — USDC collateral balance from your Gnosis Safe
-- **Positions** — Open positions filtered by BTC 5-min markets (with P&L)
-- **Orders** — Open orders with per-order cancel + cancel-all
+- **Balance** — USDC collateral balance from your Gnosis Safe/proxy wallet
+- **Positions** — Open positions filtered by BTC 5-min markets with P&L calculation
+- **Orders** — Open orders with per-order cancel + cancel-all functionality
 - **History** — Recent trade activity log
 
 ### 🔒 Security
@@ -57,8 +71,8 @@ A production-ready Telegram bot for trading Polymarket's **5-minute Bitcoin Up/D
 
 ### 1. Clone the Repository
 ```bash
-git clone https://github.com/blinkinfo/neobot.git
-cd neobot
+git clone https://github.com/blinkinfo/neobot3.git
+cd neobot3
 ```
 
 ### 2. Install Dependencies
@@ -74,6 +88,7 @@ cp .env.example .env
 Edit `.env` with your credentials:
 ```
 TELEGRAM_BOT_TOKEN=your_bot_token
+TELEGRAM_ALLOWED_CHAT_IDS=your_telegram_chat_id
 POLYMARKET_PRIVATE_KEY=your_private_key
 POLYMARKET_FUNDER_ADDRESS=your_gnosis_safe_address
 POLYMARKET_SIGNATURE_TYPE=0
@@ -94,14 +109,14 @@ One-click deployment to Railway:
 ### Steps
 1. Fork or connect this repo to [Railway](https://railway.app)
 2. Create a new project → **Deploy from GitHub Repo**
-3. Select the `blinkinfo/neobot` repository
+3. Select the `blinkinfo/neobot3` repository
 4. Add environment variables in the Railway dashboard:
    - `TELEGRAM_BOT_TOKEN`
+   - `TELEGRAM_ALLOWED_CHAT_IDS` (get your chat ID from @userinfobot)
    - `POLYMARKET_PRIVATE_KEY`
    - `POLYMARKET_FUNDER_ADDRESS`
    - `POLYMARKET_SIGNATURE_TYPE` (optional, defaults to 0 for EOA wallets)
    - `QUICK_TRADE_AMOUNT` (optional, defaults to 5)
-   - `TELEGRAM_ALLOWED_CHAT_IDS` (required — your Telegram user ID)
 5. Railway auto-detects the `Dockerfile` and deploys
 
 > **Note:** This is a **worker** service (no HTTP port). Railway will show "no exposed ports" — that's expected. The bot connects outbound to Telegram's API.
@@ -111,15 +126,16 @@ One-click deployment to Railway:
 ## 📁 Project Structure
 
 ```
-neobot/
-├── bot.py              # Main bot application (all-in-one)
-├── requirements.txt    # Python dependencies
-├── Dockerfile          # Container configuration
-├── Procfile            # Railway process definition
-├── railway.toml        # Railway build/deploy settings
-├── .env.example        # Environment variable template
-├── .gitignore          # Git ignore rules
-└── README.md           # This file
+neobot3/
+├── bot.py                # Main bot application (all-in-one)
+├── requirements.txt      # Python dependencies (with exact version pins)
+├── Dockerfile            # Container configuration
+├── Procfile              # Railway process definition
+├── railway.toml          # Railway build/deploy settings
+├── .env.example          # Environment variable template
+├── .gitignore            # Git ignore rules
+├── autotrade_state.json  # AutoTrade state (auto-generated, persistent)
+└── README.md             # This file
 ```
 
 ---
@@ -129,6 +145,7 @@ neobot/
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `TELEGRAM_BOT_TOKEN` | ✅ | — | Bot token from @BotFather |
+| `TELEGRAM_ALLOWED_CHAT_IDS` | ✅ | — | Comma-separated authorized Telegram chat IDs |
 | `POLYMARKET_PRIVATE_KEY` | ✅ | — | Wallet private key for signing trades |
 | `POLYMARKET_FUNDER_ADDRESS` | ✅ | — | Your Gnosis Safe / proxy wallet address |
 | `POLYMARKET_SIGNATURE_TYPE` | ❌ | `0` | Wallet type: `0`=EOA, `1`=Magic/email, `2`=browser proxy |
@@ -140,30 +157,66 @@ neobot/
 
 | Command | Description |
 |---------|-------------|
-| `/start` | Main menu |
-| `/slots` | BTC 5-min slot navigator |
-| `/balance` | Check USDC balance |
-| `/positions` | View open positions |
-| `/orders` | View & manage open orders |
-| `/history` | Recent trade history |
-| `/settings` | Configure quick trade amount |
+| `/start` | Main menu | 
+| `/slots` | BTC 5-min slot navigator | 
+| `/balance` | Check USDC balance | 
+| `/positions` | View open positions | 
+| `/orders` | View & manage open orders | 
+| `/history` | Recent trade history | 
+| `/settings` | Configure quick trade amount | 
+| `/autotrade` | AutoTrade control panel & Demo mode | 
 
 ---
 
 ## 🏗️ Technical Details
 
 - **Polymarket APIs**: Gamma API (market discovery), CLOB API (prices & trading), Data API (positions & activity)
-- **Trading SDK**: `py-clob-client` with configurable signature_type (0=EOA, 1=Magic, 2=proxy), chain_id=137 (Polygon)
+- **Trading SDK**: `py-clob-client` v0.34.6 with configurable signature_type (0=EOA, 1=Magic, 2=proxy), chain_id=137 (Polygon)
 - **Order Type**: Fill-or-Kill (FOK) market orders
-- **Price Feed**: Binance BTCUSDT ticker for real-time BTC reference price
+- **Price Feeds**: CoinGecko → Coinbase → Kraken → Binance (fallback chain) for BTC reference price
+- **Candle Data**: MEXC 5-min BTC-USDT (primary), Coinbase fallback for strategy calculations
+- **Strategy Indicators**: ALMA(14, 0.85, 6), Choppiness Index(14), pure Python implementation
 - **Async**: Full async architecture with `httpx` for HTTP and `asyncio.to_thread` for SDK calls
 - **Telegram**: `python-telegram-bot` v21 with inline keyboards and HTML parse mode
 
 ---
 
+## 📖 AutoTrade & Demo Mode
+
+### Enabling AutoTrade
+1. Use `/autotrade` to access the control panel
+2. Press "Start AutoTrade" to enable live trading
+3. Set your trade amount (default $1 USDC)
+4. The bot will automatically place trades **10 seconds before** each 5-min slot opens
+
+### Demo Mode (Risk-Free Testing)
+- Enable "Demo Mode" to simulate trades without real money
+- All demo trades are logged and tracked
+- Bot automatically checks resolved slots to determine wins/losses
+- View detailed stats: win rate, PnL, current/best/worst streaks
+- Perfect for evaluating strategy performance before going live
+
+### Strategy Logic
+1. Signal computed from 300 closed candles + current open candle
+2. ALMA crossover detection determines direction (UP/DOWN)
+3. Choppiness Index filters out choppy markets (CI ≥ 45 blocks signals)
+4. Trade executes 10s before slot opens for best fill timing
+5. Crossover candle itself is skipped; signal starts from next candle
+
+### Resolution & Scoring
+- Demo trades are marked for resolution when their slots end
+- Background process queries Gamma API every cycle for resolved markets
+- Winner is determined from `outcomePrices` (outcome with price closest to 1.0)
+- P&L calculated: win = +amount, loss = -amount
+- Stats persist across restarts via `autotrade_state.json`
+
+---
+
 ## ⚠️ Disclaimer
 
-This bot is for **educational and personal use only**. Trading on prediction markets involves risk. Never trade more than you can afford to lose. The authors are not responsible for any financial losses incurred through the use of this software.
+This bot is for **educational and personal use only**. Trading on prediction markets involves significant risk. Never trade more than you can afford to lose. The authors are not responsible for any financial losses incurred through the use of this software.
+
+AutoTrade functionality use real funds when enabled. Always test thoroughly with Demo Mode first.
 
 ---
 
