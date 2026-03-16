@@ -1,6 +1,6 @@
 # 🤖 NeoBot — Polymarket BTC 5-Min Trading Bot with AutoTrade
 
-A production-ready Telegram bot for trading and automating Polymarket's **5-minute Bitcoin Up/Down** prediction markets. Features manual trading via Telegram UI, a powerful **ALMA + Choppiness Index** strategy, demo mode for testing without real money, and real slot trading with precise timing.
+A production-ready Telegram bot for trading and automating Polymarket's **5-minute Bitcoin Up/Down** prediction markets. Features manual trading via Telegram UI, a powerful **Multi-Timeframe MACD (12, 26, 9)** strategy, demo mode for testing without real money, and real slot trading with precise timing.
 
 ![Python](https://img.shields.io/badge/Python-3.11+-blue?logo=python&logoColor=white)
 ![Telegram](https://img.shields.io/badge/Telegram-Bot-26A5E4?logo=telegram&logoColor=white)
@@ -33,10 +33,23 @@ A production-ready Telegram bot for trading and automating Polymarket's **5-minu
 - **Demo Result Tracking** — Automatically checks resolved slots, scores wins/losses, tracks PnL and streaks
 - **Persistent State** — All settings, trades, and stats saved locally; survives bot restarts
 
-### 📈 Trading Strategy: ALMA + Choppiness Index
-- **ALMA (Arnaud Legoux Moving Average)** — Smooth, lag-minimizing trend indicator (14-period, offset=0.85, sigma=6)
-- **Crossover Detection** — Trades only when price crosses the ALMA line; avoids ranging markets
-- **Choppiness Index Gate** — Blocks trades when CI ≥ 45 (market is range-bound/choppy)
+### 📈 Trading Strategy: Multi-Timeframe MACD (12, 26, 9)
+- **MACD Parameters** — Fast EMA: 12, Slow EMA: 26, Signal: 9
+- **1-Hour Bias Filter** — Uses 1H MACD histogram to determine overall trend direction:
+  - **Positive histogram** → Only trade UP
+  - **Negative histogram** → Only trade DOWN
+- **5-Min Entry Logic** — Uses 5-min MACD histogram for precise entry timing:
+  - **For UP trades** (when 1H bias is positive):
+    - Wait for histogram FALLING
+    - Wait for 2 consecutive candles where histogram is RISING
+    - Enter UP on the 3rd RISING candle
+    - Keep entering UP trades until histogram FALLS (1 candle stop)
+  - **For DOWN trades** (when 1H bias is negative):
+    - Wait for histogram RISING
+    - Wait for 2 consecutive candles where histogram is FALLING
+    - Enter DOWN on the 3rd FALLING candle
+    - Keep entering DOWN trades until histogram RISES (1 candle stop)
+- **Trade Amount** — Fixed $1 USDC per trade
 - **Data Sources** — MEXC 5-min BTC-USDT candles (primary), Coinbase fallback
 
 ### 💼 Portfolio Management
@@ -71,8 +84,8 @@ A production-ready Telegram bot for trading and automating Polymarket's **5-minu
 
 ### 1. Clone the Repository
 ```bash
-git clone https://github.com/blinkinfo/neobot3.git
-cd neobot3
+git clone https://github.com/blinkinfo/neobot4.git
+cd neobot4
 ```
 
 ### 2. Install Dependencies
@@ -109,7 +122,7 @@ One-click deployment to Railway:
 ### Steps
 1. Fork or connect this repo to [Railway](https://railway.app)
 2. Create a new project → **Deploy from GitHub Repo**
-3. Select the `blinkinfo/neobot3` repository
+3. Select the `blinkinfo/neobot4` repository
 4. Add environment variables in the Railway dashboard:
    - `TELEGRAM_BOT_TOKEN`
    - `TELEGRAM_ALLOWED_CHAT_IDS` (get your chat ID from @userinfobot)
@@ -126,7 +139,7 @@ One-click deployment to Railway:
 ## 📁 Project Structure
 
 ```
-neobot3/
+neobot4/
 ├── bot.py                # Main bot application (all-in-one)
 ├── requirements.txt      # Python dependencies (with exact version pins)
 ├── Dockerfile            # Container configuration
@@ -175,7 +188,7 @@ neobot3/
 - **Order Type**: Fill-or-Kill (FOK) market orders
 - **Price Feeds**: CoinGecko → Coinbase → Kraken → Binance (fallback chain) for BTC reference price
 - **Candle Data**: MEXC 5-min BTC-USDT (primary), Coinbase fallback for strategy calculations
-- **Strategy Indicators**: ALMA(14, 0.85, 6), Choppiness Index(14), pure Python implementation
+- **Strategy Indicators**: MACD(12, 26, 9) — Multi-Timeframe approach with 1H bias filter and 5-min entry timing
 - **Async**: Full async architecture with `httpx` for HTTP and `asyncio.to_thread` for SDK calls
 - **Telegram**: `python-telegram-bot` v21 with inline keyboards and HTML parse mode
 
@@ -196,12 +209,30 @@ neobot3/
 - View detailed stats: win rate, PnL, current/best/worst streaks
 - Perfect for evaluating strategy performance before going live
 
-### Strategy Logic
-1. Signal computed from 300 closed candles + current open candle
-2. ALMA crossover detection determines direction (UP/DOWN)
-3. Choppiness Index filters out choppy markets (CI ≥ 45 blocks signals)
-4. Trade executes 10s before slot opens for best fill timing
-5. Crossover candle itself is skipped; signal starts from next candle
+### Strategy Logic: Multi-Timeframe MACD
+1. **1H Bias Filter**:
+   - Compute MACD histogram on 1H candles
+   - If histogram > 0 → Only allow UP trades
+   - If histogram < 0 → Only allow DOWN trades
+   - If histogram = 0 → No clear bias, skip trade
+
+2. **5-Min Entry Timing**:
+   - For UP trades (when 1H bias is positive):
+     - Wait for histogram FALLING (momentum reversing)
+     - Need 2 consecutive candles with histogram RISING
+     - Enter UP on the 3rd RISING candle
+     - Keep entering UP trades every slot until histogram FALLS (1 candle stop)
+   
+   - For DOWN trades (when 1H bias is negative):
+     - Wait for histogram RISING (momentum reversing)
+     - Need 2 consecutive candles with histogram FALLING
+     - Enter DOWN on the 3rd FALLING candle
+     - Keep entering DOWN trades every slot until histogram RISES (1 candle stop)
+
+3. **Trade Execution**:
+   - Fixed $1 USDC per trade
+   - Entries happen 10 seconds before slot opens for best fill timing
+   - Exits when opposite trend condition triggers (1 candle reversal)
 
 ### Resolution & Scoring
 - Demo trades are marked for resolution when their slots end
