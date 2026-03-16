@@ -874,83 +874,144 @@ class PolymarketManager:
 pm = PolymarketManager()
 
 # ---------------------------------------------------------------------------
-# Strategy: ALMA + Choppiness Index (pure Python, no external dependencies)
+# Strategy: Multi-Timeframe MACD Histogram (pure Python, no external dependencies)
 # ---------------------------------------------------------------------------
 
 import math
 
 
-def compute_alma(closes: List[float], window: int = 14, offset: float = 0.85, sigma: float = 6) -> List[float]:
+def compute_ema(values: list, period: int) -> list:
     """
-    Arnaud Legoux Moving Average.
-    Returns list same length as closes; first (window-1) values are float('nan').
+    Exponential Moving Average.
+    Returns list same length as values; first (period-1) values are float('nan').
+    The first EMA value (at index period-1) is seeded with the SMA of the first `period` values.
     """
-    n = len(closes)
+    n = len(values)
     result = [float("nan")] * n
-    m = offset * (window - 1)
-    s = window / sigma
-    weights = []
-    for i in range(window):
-        w = math.exp(-((i - m) ** 2) / (2 * s * s))
-        weights.append(w)
-    w_sum = sum(weights)
-    if w_sum == 0:
+    if n < period:
         return result
-    for i in range(window - 1, n):
-        total = 0.0
-        for j in range(window):
-            total += weights[j] * closes[i - (window - 1) + j]
-        result[i] = total / w_sum
+    # Seed with SMA
+    sma = sum(values[:period]) / period
+    result[period - 1] = sma
+    multiplier = 2.0 / (period + 1)
+    for i in range(period, n):
+        result[i] = (values[i] - result[i - 1]) * multiplier + result[i - 1]
     return result
 
 
-def compute_choppiness_index(highs: List[float], lows: List[float], closes: List[float], length: int = 14) -> List[float]:
+def compute_macd(closes: list, fast: int = 12, slow: int = 26, signal: int = 9) -> dict:
     """
-    Choppiness Index.
-    CI = 100 * LOG10( SUM(TrueRange, length) / (HighestHigh - LowestLow) ) / LOG10(length)
-
-    Uses raw True Range per candle (NOT smoothed/Wilder ATR).
-    Returns list same length as input; first `length` values are float('nan').
+    Compute MACD line, Signal line, and Histogram.
+    
+    MACD Line = EMA(fast) - EMA(slow)
+    Signal Line = EMA(signal) of MACD Line
+    Histogram = MACD Line - Signal Line
+    
+    Returns dict with keys: 'macd', 'signal', 'histogram' — each a list same length as closes.
+    Values before sufficient warmup are float('nan').
     """
     n = len(closes)
-    result = [float("nan")] * n
-    if n < 2:
-        return result
+    ema_fast = compute_ema(closes, fast)
+    ema_slow = compute_ema(closes, slow)
+    
+    # MACD line = fast EMA - slow EMA
+    macd_line = [float("nan")] * n
+    for i in range(n):
+        if not math.isnan(ema_fast[i]) and not math.isnan(ema_slow[i]):
+            macd_line[i] = ema_fast[i] - ema_slow[i]
+    
+    # Filter out NaN values for signal EMA computation, then map back
+    # Signal line = EMA of MACD line (only over valid MACD values)
+    # Find first valid MACD index
+    first_valid = -1
+    for i in range(n):
+        if not math.isnan(macd_line[i]):
+            first_valid = i
+            break
+    
+    signal_line = [float("nan")] * n
+    if first_valid >= 0:
+        # Extract valid MACD values
+        valid_macd = [macd_line[i] for i in range(first_valid, n)]
+        valid_signal = compute_ema(valid_macd, signal)
+        # Map back to original indices
+        for j, val in enumerate(valid_signal):
+            signal_line[first_valid + j] = val
+    
+    # Histogram = MACD line - Signal line
+    histogram = [float("nan")] * n
+    for i in range(n):
+        if not math.isnan(macd_line[i]) and not math.isnan(signal_line[i]):
+            histogram[i] = macd_line[i] - signal_line[i]
+    
+    return {
+        "macd": macd_line,
+        "signal": signal_line,
+        "histogram": histogram,
+    }
 
-    # Compute True Range for each candle
-    tr = [0.0] * n
-    tr[0] = highs[0] - lows[0]
-    for i in range(1, n):
-        tr[i] = max(
-            highs[i] - lows[i],
-            abs(highs[i] - closes[i - 1]),
-            abs(lows[i] - closes[i - 1]),
-        )
-
-    log_length = math.log10(length)
-    if log_length == 0:
-        return result
-
-    for i in range(length, n):
-        # Sum of True Range over the lookback window
-        tr_sum = sum(tr[i - length + 1 : i + 1])
-
-        # Highest high and lowest low over the lookback window
-        hh = max(highs[i - length + 1 : i + 1])
-        ll = min(lows[i - length + 1 : i + 1])
-
-        hl_range = hh - ll
-        if hl_range <= 0:
-            result[i] = 100.0  # No range = maximum choppiness
-            continue
-
-        result[i] = 100.0 * math.log10(tr_sum / hl_range) / log_length
-
-    return result
-
-# ---------------------------------------------------------------------------
 # MEXC Candle Fetcher (primary) + Coinbase Fallback + Signal Engine
 # ---------------------------------------------------------------------------
+
+async def fetch_1h_candles(http_client: httpx.AsyncClient, n: int = 100) -> list:
+    """
+    Fetch 1-hour BTC-USDT candles from MEXC (Coinbase fallback).
+    Returns list of dicts sorted ascending: [{t, o, h, l, c, v}, ...]
+    Need enough candles for MACD(12,26,9) warmup on 1H timeframe.
+    """
+    # Source 1: MEXC 1H candles
+    try:
+        resp = await http_client.get(
+            MEXC_CANDLES_URL,
+            params={"symbol": "BTCUSDT", "interval": "60m", "limit": str(n)},
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        raw = resp.json()
+        candles = []
+        for row in raw:
+            candle_ts = int(row[0]) // 1000  # ms -> seconds
+            candles.append({
+                "t": candle_ts,
+                "o": float(row[1]),
+                "h": float(row[2]),
+                "l": float(row[3]),
+                "c": float(row[4]),
+                "v": float(row[5]),
+            })
+        candles.sort(key=lambda x: x["t"])
+        logger.debug("Fetched %d MEXC 1H candles", len(candles))
+        return candles
+    except Exception as exc:
+        logger.warning("MEXC 1H candles failed: %s", exc)
+
+    # Source 2: Coinbase 1H candles (fallback)
+    try:
+        resp = await http_client.get(
+            COINBASE_CANDLES_URL,
+            params={"granularity": "3600", "limit": str(n)},
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        raw = resp.json()
+        candles = []
+        for row in raw:
+            candles.append({
+                "t": int(row[0]),
+                "l": float(row[1]),
+                "h": float(row[2]),
+                "o": float(row[3]),
+                "c": float(row[4]),
+                "v": float(row[5]),
+            })
+        candles.sort(key=lambda x: x["t"])
+        logger.debug("Fetched %d Coinbase 1H candles (fallback)", len(candles))
+        return candles
+    except Exception as exc:
+        logger.warning("Coinbase 1H candles also failed: %s", exc)
+
+    raise RuntimeError("Failed to fetch 1H candles from all sources")
+
 
 async def fetch_mexc_candles(http_client: httpx.AsyncClient, n: int = 300) -> List[dict]:
     """
@@ -1100,94 +1161,136 @@ async def fetch_current_open_candle(http_client: httpx.AsyncClient) -> Optional[
     return None
 
 
-def compute_signal(candles: List[dict]) -> str:
+def compute_signal(candles_5m: list, candles_1h: list) -> str:
     """
-    Compute trading signal from candles using ALMA + Choppiness Index strategy.
+    Compute trading signal using Multi-Timeframe MACD Histogram strategy.
 
-    Logic:
-    - Compute ALMA(14, 0.85, 6) and Choppiness Index(14) on ALL candles
-    - Track ALMA crossover direction:
-        * When price closes ABOVE ALMA after being below/equal -> crossover UP at candle N
-        * When price closes BELOW ALMA after being above -> crossover DOWN at candle X
-    - On crossover candle itself: record the flip, do NOT trade
-    - From the NEXT candle onward (N+1, X+1): emit signal in that direction
-    - Direction persists until the next crossover flips it
-    - CI gate: if CI >= 45 on any candle, emit NONE for that candle (skip trade)
-      but do NOT reset direction -- resume same direction when CI drops back below 45
+    MACD parameters: fast=12, slow=26, signal=9 (standard)
+    Trade amount: fixed $1 per trade (configured elsewhere)
+
+    Step 1 — 1H Bias Filter:
+        Check current 1H candle's MACD histogram.
+        - Positive -> only allow UP trades
+        - Negative -> only allow DOWN trades
+
+    Step 2 — 5-Min Entry Logic:
+        For UP trades (1H bias positive):
+            Need 2 consecutive 5-min candles where histogram is RISING.
+            Enter UP on the 3rd candle. Keep entering until histogram falls (1 candle stop).
+
+        For DOWN trades (1H bias negative):
+            Need 2 consecutive 5-min candles where histogram is FALLING.
+            Enter DOWN on the 3rd candle. Keep entering until histogram rises (1 candle stop).
 
     Returns: 'UP', 'DOWN', or 'NONE'
     """
-    MIN_CANDLES = 30  # absolute minimum for ALMA(14) + CI(14) warmup
-    if len(candles) < MIN_CANDLES:
-        logger.warning("Not enough candles for signal: %d (need %d)", len(candles), MIN_CANDLES)
+    # --- Minimum candle requirements ---
+    # MACD(12,26,9) needs at least 26+9-1 = 34 candles for valid histogram
+    MIN_5M_CANDLES = 50
+    MIN_1H_CANDLES = 50
+    if len(candles_5m) < MIN_5M_CANDLES:
+        logger.warning("Not enough 5m candles for signal: %d (need %d)", len(candles_5m), MIN_5M_CANDLES)
+        return "NONE"
+    if len(candles_1h) < MIN_1H_CANDLES:
+        logger.warning("Not enough 1H candles for signal: %d (need %d)", len(candles_1h), MIN_1H_CANDLES)
         return "NONE"
 
-    # Use ALL available candles -- do NOT slice to a small window.
-    # More candles = better indicator warmup = more accurate signals.
-    closes = [c["c"] for c in candles]
-    highs  = [c["h"] for c in candles]
-    lows   = [c["l"] for c in candles]
+    # --- Step 1: 1H MACD Histogram for directional bias ---
+    closes_1h = [c["c"] for c in candles_1h]
+    macd_1h = compute_macd(closes_1h, fast=12, slow=26, signal=9)
+    hist_1h = macd_1h["histogram"]
 
-    alma_vals = compute_alma(closes, window=14, offset=0.85, sigma=6)
-    ci_vals   = compute_choppiness_index(highs, lows, closes, length=14)
+    # Get the latest valid 1H histogram value
+    bias_1h_value = float("nan")
+    for i in range(len(hist_1h) - 1, -1, -1):
+        if not math.isnan(hist_1h[i]):
+            bias_1h_value = hist_1h[i]
+            break
 
-    n = len(candles)
+    if math.isnan(bias_1h_value):
+        logger.warning("1H MACD histogram is NaN — cannot determine bias")
+        return "NONE"
 
-    # above_alma[i] = True if close is strictly above ALMA at candle i
-    above_alma = []
-    for i in range(n):
-        a = alma_vals[i]
-        above_alma.append((not math.isnan(a)) and closes[i] > a)
+    # Determine bias: positive = UP only, negative = DOWN only
+    if bias_1h_value > 0:
+        allowed_direction = "UP"
+    elif bias_1h_value < 0:
+        allowed_direction = "DOWN"
+    else:
+        # Exactly zero — no clear bias
+        logger.info("1H MACD histogram is exactly 0 — no bias, skipping")
+        return "NONE"
 
-    # Replay full state machine across ALL candles to capture
-    # crossovers that may have happened well before the recent candles.
-    # States: "none" | "crossover_up" | "crossover_down" | "up" | "down"
-    state = "none"
-    last_signal = "NONE"
+    logger.info("1H MACD bias: histogram=%.4f -> allowed direction=%s", bias_1h_value, allowed_direction)
 
-    for i in range(1, n):
-        if math.isnan(alma_vals[i]) or math.isnan(alma_vals[i - 1]):
-            continue
+    # --- Step 2: 5-Min MACD Histogram entry logic ---
+    closes_5m = [c["c"] for c in candles_5m]
+    macd_5m = compute_macd(closes_5m, fast=12, slow=26, signal=9)
+    hist_5m = macd_5m["histogram"]
 
-        prev_above  = above_alma[i - 1]
-        curr_above  = above_alma[i]
-        crossed_up   = (not prev_above) and curr_above
-        crossed_down = prev_above and (not curr_above)
+    # We need at least 3 valid histogram values at the end to check 2 confirmations + current
+    # Find the last N valid histogram values
+    valid_indices = [i for i in range(len(hist_5m)) if not math.isnan(hist_5m[i])]
+    if len(valid_indices) < 3:
+        logger.warning("Not enough valid 5m MACD histogram values: %d", len(valid_indices))
+        return "NONE"
 
-        # Crossover detected at candle N -- flip direction, do NOT trade this candle
-        if crossed_up:
-            state = "crossover_up"
-            last_signal = "NONE"
-            continue
-        elif crossed_down:
-            state = "crossover_down"
-            last_signal = "NONE"
-            continue
+    # Get the last 3 histogram values (these represent the last 3 closed candles)
+    # idx[-3] = N (two candles ago), idx[-2] = N+1 (one candle ago), idx[-1] = N+2 (most recent closed)
+    i_n   = valid_indices[-3]  # candle N
+    i_n1  = valid_indices[-2]  # candle N+1
+    i_n2  = valid_indices[-1]  # candle N+2 (most recent — this is where we decide)
 
-        # First candle AFTER crossover (N+1) -- advance to confirmed direction
-        if state == "crossover_up":
-            state = "up" if curr_above else "none"
-        elif state == "crossover_down":
-            state = "down" if (not curr_above) else "none"
-        # else: state stays as-is ("up", "down", or "none")
+    h_n   = hist_5m[i_n]
+    h_n1  = hist_5m[i_n1]
+    h_n2  = hist_5m[i_n2]
 
-        # Emit signal based on confirmed direction + CI gate
-        if state == "up":
-            ci_val = ci_vals[i] if i < len(ci_vals) else float("nan")
-            if (not math.isnan(ci_val)) and ci_val < 45.0:
-                last_signal = "UP"
-            else:
-                last_signal = "NONE"  # CI gate blocks, but direction stays "up"
-        elif state == "down":
-            ci_val = ci_vals[i] if i < len(ci_vals) else float("nan")
-            if (not math.isnan(ci_val)) and ci_val < 45.0:
-                last_signal = "DOWN"
-            else:
-                last_signal = "NONE"  # CI gate blocks, but direction stays "down"
+    logger.info(
+        "5m MACD histogram: N=%.4f, N+1=%.4f, N+2=%.4f",
+        h_n, h_n1, h_n2,
+    )
+
+    if allowed_direction == "UP":
+        # For UP: histogram must be RISING
+        # 2 candle confirmation: h_n1 > h_n AND h_n2 > h_n1
+        # OR we're already in a rising streak: just check h_n2 > h_n1 (continue)
+        # But also stop if histogram falls: h_n2 < h_n1
+        
+        rising_n1 = (h_n1 > h_n)      # 1st confirmation: N to N+1 rising
+        rising_n2 = (h_n2 > h_n1)     # 2nd confirmation: N+1 to N+2 rising
+
+        if rising_n1 and rising_n2:
+            # Two consecutive rising candles confirmed — trade UP on next candle
+            logger.info("5m MACD: 2 consecutive rising confirmations — signal UP")
+            return "UP"
         else:
-            last_signal = "NONE"
+            # Not enough rising momentum or histogram started falling
+            if not rising_n2:
+                logger.info("5m MACD: histogram falling (%.4f -> %.4f) — no UP trade", h_n1, h_n2)
+            else:
+                logger.info("5m MACD: only 1 rising candle, need 2 — no trade")
+            return "NONE"
 
-    return last_signal
+    elif allowed_direction == "DOWN":
+        # For DOWN: histogram must be FALLING
+        # 2 candle confirmation: h_n1 < h_n AND h_n2 < h_n1
+        # Stop if histogram rises: h_n2 > h_n1
+        
+        falling_n1 = (h_n1 < h_n)     # 1st confirmation: N to N+1 falling
+        falling_n2 = (h_n2 < h_n1)    # 2nd confirmation: N+1 to N+2 falling
+
+        if falling_n1 and falling_n2:
+            # Two consecutive falling candles confirmed — trade DOWN on next candle
+            logger.info("5m MACD: 2 consecutive falling confirmations — signal DOWN")
+            return "DOWN"
+        else:
+            if not falling_n2:
+                logger.info("5m MACD: histogram rising (%.4f -> %.4f) — no DOWN trade", h_n1, h_n2)
+            else:
+                logger.info("5m MACD: only 1 falling candle, need 2 — no trade")
+            return "NONE"
+
+    return "NONE"
 
 # ---------------------------------------------------------------------------
 # Notification Helpers
@@ -1252,7 +1355,7 @@ async def send_demo_notification(
         f"  Direction:  {dir_label}\n"
         f"  Slot:       <b>{slot_time_label}</b>\n"
         f"  Amount:     <code>${amount:.2f} USDC</code> <i>(simulated)</i>\n"
-        f"  Signal:     ALMA {dir_arrow} + CI filtered\n\n"
+        f"  Signal:     MACD Histogram {dir_arrow}\n\n"
         f"<i>No real trade placed.</i>"
     )
 
@@ -1540,7 +1643,7 @@ async def autotrade_loop(application: Application) -> None:
 
             try:
                 http = await pm.ensure_http()
-                candles = await fetch_closed_candles(http, n=300)
+                candles = await fetch_closed_candles(http, n=500)
 
                 # MEXC/Coinbase return closed candles only.
                 # Fetch the currently-open candle separately (MEXC/Binance)
@@ -1571,7 +1674,16 @@ async def autotrade_loop(application: Application) -> None:
                 else:
                     logger.warning("Could not fetch open candle — signal may be 1 candle delayed this slot")
 
-                signal = compute_signal(candles)
+                # Fetch 1H candles for bias filter
+                try:
+                    candles_1h = await fetch_1h_candles(http, n=100)
+                except Exception as exc_1h:
+                    logger.error("1H candle fetch failed: %s", exc_1h)
+                    await send_autotrade_error(bot, str(exc_1h), "Failed to fetch 1H candles for bias filter")
+                    await asyncio.sleep(12)
+                    continue
+
+                signal = compute_signal(candles, candles_1h)
             except Exception as exc:
                 logger.error("Candle fetch/signal error: %s", exc)
                 await send_autotrade_error(bot, str(exc), "Failed to fetch candles or compute signal")
@@ -2349,9 +2461,9 @@ def _build_autotrade_panel_text(state: AutotradeState) -> str:
         f"  Last Slot:     <code>{last_slot}</code>\n"
         f"  Demo Trades:   <code>{demo_count}</code>\n"
         f"\n"
-        f"<b>Strategy</b>: ALMA(14, 0.85, 6) + CI(14) [gate: CI &lt; 45]\n"
+        f"<b>Strategy</b>: MACD(12, 26, 9) Multi-TF Histogram\n"
         f"<b>Timing</b>: Trade placed 10s before slot opens\n"
-        f"<b>Data</b>: MEXC 5-min BTC-USDT candles (Coinbase fallback)\n"
+        f"<b>Data</b>: MEXC 5-min + 1H BTC-USDT candles (Coinbase fallback)\n"
         f"\n"
         f"<i>Use buttons below to control autotrade.</i>"
     )
