@@ -1730,30 +1730,36 @@ async def autotrade_loop(application: Application) -> None:
                 continue
 
             slot_label = target_slot.time_label()
-            token_id = target_slot.up_token_id if signal == "UP" else target_slot.down_token_id
+
+            # --- FLIP STRATEGY: invert the signal direction ---
+            # The MACD strategy produces the original signal, but we trade
+            # the OPPOSITE direction.  UP signal -> trade DOWN, DOWN signal -> trade UP.
+            trade_direction = "DOWN" if signal == "UP" else "UP"
+
+            token_id = target_slot.up_token_id if trade_direction == "UP" else target_slot.down_token_id
 
             if not token_id:
-                logger.warning("Token ID missing for %s %s", signal, slot_label)
+                logger.warning("Token ID missing for %s (flipped from %s) %s", trade_direction, signal, slot_label)
                 await asyncio.sleep(12)
                 continue
 
             if autotrade_state.enabled and pm.can_trade:
                 logger.info(
-                    "AutoTrade: placing %s order for slot %s, amount=%.2f",
-                    signal, slot_label, autotrade_state.trade_amount,
+                    "AutoTrade: placing %s order (flipped from %s signal) for slot %s, amount=%.2f",
+                    trade_direction, signal, slot_label, autotrade_state.trade_amount,
                 )
                 result = await pm.place_market_order(token_id, autotrade_state.trade_amount)
                 if result["success"]:
                     logger.info("AutoTrade order placed successfully: %s", result.get("data"))
                     await send_autotrade_notification(
-                        bot, True, signal, slot_label,
+                        bot, True, trade_direction, slot_label,
                         autotrade_state.trade_amount,
                         order_data=result.get("data"),
                     )
                 else:
                     logger.error("AutoTrade order failed: %s", result.get("error"))
                     await send_autotrade_notification(
-                        bot, False, signal, slot_label,
+                        bot, False, trade_direction, slot_label,
                         autotrade_state.trade_amount,
                         error=result.get("error"),
                     )
@@ -1771,7 +1777,7 @@ async def autotrade_loop(application: Application) -> None:
                     "ts": int(time.time()),
                     "slot_ts": next_slot_ts,
                     "slot_time": slot_label,
-                    "direction": signal,
+                    "direction": trade_direction,
                     "amount": autotrade_state.trade_amount,
                     "signal": signal,
                     "resolved": False,
@@ -1779,9 +1785,9 @@ async def autotrade_loop(application: Application) -> None:
                 autotrade_state.demo_trades.append(demo_record)
                 if len(autotrade_state.demo_trades) > 200:
                     autotrade_state.demo_trades = autotrade_state.demo_trades[-200:]
-                logger.info("Demo trade recorded: %s %s", signal, slot_label)
+                logger.info("Demo trade recorded: %s (flipped from %s) %s", trade_direction, signal, slot_label)
                 await send_demo_notification(
-                    bot, signal, slot_label, autotrade_state.trade_amount, signal
+                    bot, trade_direction, slot_label, autotrade_state.trade_amount, signal
                 )
 
             # Check for resolved demo trade results
@@ -1792,7 +1798,7 @@ async def autotrade_loop(application: Application) -> None:
             except Exception as exc:
                 logger.debug("Demo result check failed: %s", exc)
 
-            autotrade_state.last_signal = signal
+            autotrade_state.last_signal = trade_direction
             autotrade_state.last_trade_slot_ts = next_slot_ts
             save_autotrade_state(autotrade_state)
 
